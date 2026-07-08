@@ -13,6 +13,7 @@ async function init() {
     setupWakeLock();
     setupFallbackKeepAwake();
     applyEReaderStyles();
+    setupResponsiveRefit();
     updateQuote();
     setInterval(updateQuote, config.updateInterval);
   } catch (error) {
@@ -24,9 +25,15 @@ async function init() {
 /**
  * Load quotes from external JSON file
  */
+function getDataUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const lang = params.get('lang') || config.language;
+  return config.dataUrls[lang] || config.dataUrls.en;
+}
+
 async function loadQuotes() {
   try {
-    const response = await fetch(config.dataUrl);
+    const response = await fetch(getDataUrl());
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -108,27 +115,52 @@ function findQuoteForCurrentTime() {
 }
 
 /**
- * Adjust font size based on quote length and screen orientation
+ * Shrink (or grow) the quote's font size until it fits inside the
+ * container without needing to scroll, based on its actual rendered
+ * dimensions rather than a character-count guess. Works for any
+ * language/script and any viewport size or orientation.
  */
-function adjustFontSizeForQuote(quoteLength) {
+function fitQuoteText() {
   const quoteElement = document.querySelector(config.selectors.quote);
-  if (!quoteElement) return;
-  
-  const isPortrait = window.innerHeight > window.innerWidth;
-  const baseSize = isPortrait 
-    ? config.fontSize.base * config.fontSize.portraitMultiplier 
-    : config.fontSize.base;
-  
-  let fontSize;
-  if (quoteLength < config.fontSize.shortQuoteThreshold) {
-    fontSize = config.fontSize.shortQuoteSize;
-  } else if (quoteLength > config.fontSize.longQuoteThreshold) {
-    fontSize = config.fontSize.longQuoteSize;
-  } else {
-    fontSize = baseSize;
+  const container = document.querySelector(config.selectors.quoteContainer);
+  const authorElement = document.querySelector(config.selectors.author);
+  if (!quoteElement || !container) return;
+
+  // #quote is fixed to 100% width (see CSS), so it always wraps within
+  // the container and can never overflow horizontally. Only the vertical
+  // fit needs to be measured/solved for.
+  const containerRect = container.getBoundingClientRect();
+  const containerStyle = getComputedStyle(container);
+  const paddingY = parseFloat(containerStyle.paddingTop) + parseFloat(containerStyle.paddingBottom);
+
+  // On narrow layouts the author line sits in normal flow below the quote
+  // and takes up vertical space; on wide layouts it's absolutely
+  // positioned and doesn't, so only reserve space for it when stacked.
+  const authorIsStacked = authorElement && getComputedStyle(authorElement).position === 'static';
+  const authorSpace = authorIsStacked ? authorElement.getBoundingClientRect().height + 32 : 0;
+
+  const maxHeight = (containerRect.height - paddingY - authorSpace) * config.fontSize.heightRatio;
+
+  const { minPx, maxPx } = config.fontSize;
+
+  const fitsAt = (px) => {
+    quoteElement.style.fontSize = `${px}px`;
+    return quoteElement.scrollHeight <= maxHeight;
+  };
+
+  if (fitsAt(maxPx)) return;
+
+  let lo = minPx;
+  let hi = maxPx;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (fitsAt(mid)) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
   }
-  
-  quoteElement.style.fontSize = `${fontSize}vw`;
+  quoteElement.style.fontSize = `${lo}px`;
 }
 
 /**
@@ -170,13 +202,30 @@ function updateQuote() {
     quoteElement.innerHTML = `"${highlightedQuote}"`;
     authorElement.textContent = `${matchedQuote.title} – ${matchedQuote.author}`;
     
-    // Adjust font size
-    adjustFontSizeForQuote(matchedQuote.quote.length);
-    
+    // Shrink/grow font size to fit without scrolling
+    fitQuoteText();
+
     // Fade in
     quoteElement.style.opacity = '1';
     authorElement.style.opacity = '1';
   }, config.fadeOutDuration);
+}
+
+/**
+ * Re-fit the quote text whenever the viewport changes (resize, rotation)
+ * or once the web font finishes loading (fallback-font metrics can differ
+ * enough from the final font to leave the fit slightly off).
+ */
+function setupResponsiveRefit() {
+  let resizeTimeout;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(fitQuoteText, 150);
+  });
+
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => fitQuoteText());
+  }
 }
 
 /**
